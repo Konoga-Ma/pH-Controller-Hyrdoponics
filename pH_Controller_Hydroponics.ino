@@ -293,7 +293,7 @@ float measurePH() {
 
 void controlPumps(float pHValue) {
   if (pHValue > SET_POINT_PH + PH_THRESHOLD && !isPump1Attached) {
-    pump1.attach(8); // Pumpe rechts PH-Plus
+    pump1.attach(8); // Pump right PH-Minus
     isPump1Attached = true;
     pump1.write(170);
     delay(100);
@@ -301,7 +301,7 @@ void controlPumps(float pHValue) {
     pump1.detach();
     isPump1Attached = false;
   } else if (pHValue < SET_POINT_PH - PH_THRESHOLD && !isPump2Attached) {
-    pump2.attach(9); // Pumpe links PH-Minus
+    pump2.attach(9); // Pump left PH-Plus
     isPump2Attached = true;
     pump2.write(10);
     delay(100);
