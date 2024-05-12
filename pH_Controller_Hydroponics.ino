@@ -1,10 +1,7 @@
-#include <U8g2lib.h>
-#ifdef U8X8_HAVE_HW_SPI
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include <SPI.h>
-#endif
-#ifdef U8X8_HAVE_HW_I2C
 #include <Wire.h>
-#endif
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <Servo.h>
@@ -15,35 +12,39 @@
 #include "GravityRtc.h"
 
 // Netzwerkdaten
-char ssid[] = SECRET_SSID;        // Ihr Netzwerkname (SSID)
-char pass[] = SECRET_PASS;        // Ihr Netzwerkpasswort
+char ssid[] = SECRET_SSID;
+char pass[] = SECRET_PASS;
 
 WiFiServer server(80);
 
-// Konstanten und Variablen
 #define TEMPERATURE_SENSOR_PIN 2
 #define TDS_SENSOR_PIN A1
 #define PH_SENSOR_PIN A2
 #define SET_POINT_PH 5.8
-#define PH_THRESHOLD 0.15
+#define PH_THRESHOLD 0.10
 #define UPDATE_INTERVAL 5000
 #define PH_MEASUREMENT_INTERVAL 120000
 #define SD_CARD_CS_PIN 5
 #define DATA_LOG_INTERVAL 900000
 #define SCOUNT 30 // Anzahl der Messpunkte für den Medianfilter
-#define BUTTON_PIN_1 3  // Taster 1 an Pin D3
-#define BUTTON_PIN_2 4  // Taster 2 an Pin D4
+#define BUTTON_PIN_1 3  // Taster 1 an Pin D3 Pumpe starten
+#define BUTTON_PIN_2 4  // Taster 2 an Pin D4 Pumpe starten
+#define BUTTON_PIN_3 6  // Neuer Taster 3 an Pin D6 für pH erhöhen
+#define BUTTON_PIN_4 7  // Neuer Taster 4 an Pin D7 für pH verringern
+#define OLED_RESET -1  // Reset pin # (or -1 if sharing Arduino reset pin)
 
 
-#define PH_BUFFER_SIZE 10 // Größe des Buffers für den gleitenden Mittelwert
-float phValues[PH_BUFFER_SIZE]; // Array zum Speichern der letzten pH-Werte
-int phValueIndex = 0; // Index für das pH-Werte-Array
-float averagePH = 0.0; // Variable für den gleitenden Mittelwert des pH-Wertes
+Adafruit_SSD1306 display(128, 64, &Wire, OLED_RESET);
+
+#define PH_BUFFER_SIZE 10
+float phValues[PH_BUFFER_SIZE];
+int phValueIndex = 0;
+float averagePH = 0.0;
+float setPointPH = SET_POINT_PH;
 
 DFRobot_PH ph;
 OneWire oneWire(TEMPERATURE_SENSOR_PIN);
 DallasTemperature sensors(&oneWire);
-U8G2_SSD1306_128X32_UNIVISION_F_HW_I2C u8g2(U8G2_R0, U8X8_PIN_NONE);
 Servo pump1;
 Servo pump2;
 boolean isPump1Attached = false;
@@ -54,25 +55,32 @@ boolean isFirstPHValueMeasured = false;
 unsigned long lastPHMeasurementTime = 0;
 unsigned long lastDataLogTime = 0;
 File dataFile;
-float globalEcValue = 0.0; // Globale Variable für den EC-Wert
-float currentTemperature = 0.0; // Globale Variable für die Temperatur
-float currentPHValue = 0.0; // Globale Variable für den pH-Wert
+float globalEcValue = 0.0;
+float currentTemperature = 0.0;
+float currentPHValue = 0.0;
 
 int analogBuffer[SCOUNT];
 int analogBufferTemp[SCOUNT];
 int analogBufferIndex = 0;
 unsigned long previousTdsSampleTime = 0;
 
-GravityRtc rtc;     // RTC-Objekt initialisieren
+GravityRtc rtc;
+
+unsigned long correctionTimes[120]; // Array zum Speichern der Zeitstempel der letzten Korrekturen für jede Pumpe
+int correctionIndex = 0; // Index für das correctionTimes Array
+int minusCorrectionCount = 0; // Zähler für Korrekturen in der letzten Stunde für pH-Minus
+int plusCorrectionCount = 0; // Zähler für Korrekturen in der letzten Stunde für pH-Plus
+
 
 void setup() {
   Serial.begin(9600);
-
-  // RTC initialisieren
   rtc.setup();
 
-  // Versuchen, eine WiFi-Verbindung herzustellen
-  Serial.println("Verbinde mit WiFi...");
+  pinMode(BUTTON_PIN_1, INPUT_PULLUP);
+  pinMode(BUTTON_PIN_2, INPUT_PULLUP);
+  pinMode(BUTTON_PIN_3, INPUT_PULLUP);
+  pinMode(BUTTON_PIN_4, INPUT_PULLUP);
+
   WiFi.begin(ssid, pass);
   while (WiFi.status() != WL_CONNECTED) {
     delay(5000);
@@ -83,12 +91,19 @@ void setup() {
   Serial.print("IP Adresse: ");
   Serial.println(ip);
 
-  // Starten des Webservers
   server.begin();
   Serial.println("Webserver gestartet");
 
   sensors.begin();
-  u8g2.begin(); // OLED Display initialisieren
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;);
+  }
+  display.display();
+  delay(2000);
+  display.clearDisplay();
+
   ph.begin();
 
   if (!SD.begin(SD_CARD_CS_PIN)) {
@@ -100,19 +115,13 @@ void setup() {
 
 void loop() {
   unsigned long currentTime = millis();
-
-  // Aktualisieren Sie die Sensordaten
   updateSensorValues();
-
-  // Anzeigen der Sensorwerte auf dem OLED
+  updateCorrectionCounts();  // Zähler aktualisieren
   displaySensorValues();
-
-  controlPumpsWithButtons(); 
-
-
+  controlPumpsWithButtons();
 
   if (!isFirstPHValueMeasured) {
-    firstPHValue = averagePH; // Verwenden Sie averagePH anstelle von currentPHValue
+    firstPHValue = averagePH;
     isFirstPHValueMeasured = true;
     lastPHMeasurementTime = currentTime;
   } else if (currentTime - lastPHMeasurementTime >= PH_MEASUREMENT_INTERVAL) {
@@ -168,25 +177,56 @@ void updateSensorValues() {
   averagePH = sum / PH_BUFFER_SIZE;
 }
 
-void displaySensorValues() {
-  u8g2.clearBuffer(); 
-  u8g2.setFont(u8g2_font_ncenB08_tr);
-  
-  u8g2.setCursor(0, 10);
-  u8g2.print("Temp: ");
-  u8g2.print(currentTemperature);
-  u8g2.print(" C");
+void updateCorrectionCounts() {
+  unsigned long oneHourAgo = millis() - 3600000;
+  minusCorrectionCount = 0;
+  plusCorrectionCount = 0;
 
-  u8g2.setCursor(0, 20);
-  u8g2.print("EC: ");
-  u8g2.print(globalEcValue, 2);
-
-  u8g2.setCursor(0, 30);
-  u8g2.print("pH: ");
-  u8g2.print(averagePH);
-
-  u8g2.sendBuffer();
+  for (int i = 0; i < correctionIndex; i++) {
+    if (correctionTimes[i] > oneHourAgo) {
+      if (i % 2 == 0) { // Gerade Indizes für pH-Minus
+        minusCorrectionCount++;
+      } else { // Ungerade Indizes für pH-Plus
+        plusCorrectionCount++;
+      }
+    }
+  }
 }
+
+void displaySensorValues() {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 0);
+  display.print("Temp: ");
+  display.print(currentTemperature);
+  display.print(" C");
+
+  display.setCursor(0, 10);
+  display.print("EC: ");
+  display.print(globalEcValue, 2);
+
+  display.setCursor(0, 20);
+  display.print("pH: ");
+  display.print(averagePH);
+
+  display.setCursor(0, 30);
+  display.print("pH-Set: ");
+  display.print(setPointPH);
+
+  display.setCursor(0, 40);
+  display.print("pH-Minus: Last ");
+  display.print(minusCorrectionCount);
+  display.print(" hr");
+
+  display.setCursor(0, 50);
+  display.print("pH-Plus: Last ");
+  display.print(plusCorrectionCount);
+  display.print(" hr");
+
+  display.display();
+}
+
 
 void handleClient(float pHValue) {
   WiFiClient client = server.available();
@@ -268,21 +308,20 @@ void measureAndDisplay() {
   globalEcValue = ecValue; // Aktualisieren der globalen EC-Wert-Variable
 
   // Aktualisierte Code für OLED-Display
-  u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_ncenB08_tr);
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 0);
+  display.print("Temp: ");
+  display.print(temperature);
+  display.print(" C");
 
-  u8g2.setCursor(0, 10);
-  u8g2.print("Temp: ");
-  u8g2.print(temperature);
-  u8g2.print(" C");
+  display.setCursor(0, 10);
+  display.print("EC: ");
+  display.print(ecValue, 2);
 
-  u8g2.setCursor(0, 20);
-  u8g2.print("EC: ");
-  u8g2.print(ecValue, 2);
-
-  u8g2.sendBuffer();
+  display.display();
 }
-
 
 float measurePH() {
   sensors.requestTemperatures();
@@ -292,28 +331,41 @@ float measurePH() {
 }
 
 void controlPumps(float pHValue) {
-  if (pHValue > SET_POINT_PH + PH_THRESHOLD && !isPump1Attached) {
-    pump1.attach(8); // Pump right PH-Minus
-    isPump1Attached = true;
-    pump1.write(170);
+  unsigned long currentMillis = millis();
+
+  // Pumpe 1 an D9 senkt den pH-Wert, wenn er über dem Sollwert plus Schwellenwert liegt
+  if (pHValue > setPointPH + PH_THRESHOLD && !isPump1Attached) {
+    pump1.attach(9); // Pumpe 1 für pH-Minus
+    pump1.write(170); // Aktivierung der Pumpe
     delay(100);
-    pump1.write(90);
+    pump1.write(90); // Deaktivierung der Pumpe
     pump1.detach();
-    isPump1Attached = false;
-  } else if (pHValue < SET_POINT_PH - PH_THRESHOLD && !isPump2Attached) {
-    pump2.attach(9); // Pump left PH-Plus
-    isPump2Attached = true;
-    pump2.write(10);
+    correctionTimes[correctionIndex++] = currentMillis; // Speichern des Zeitstempels
+    if (correctionIndex >= 120) correctionIndex = 0; // Array-Wrap-around
+    minusCorrectionCount++; // Zählung der pH-Minus Korrekturen
+  } 
+
+  // Pumpe 2 an D8 erhöht den pH-Wert, wenn er unter dem Sollwert minus Schwellenwert liegt
+  if (pHValue < setPointPH - PH_THRESHOLD && !isPump2Attached) {
+    pump2.attach(8); // Pumpe 2 für pH-Plus
+    pump2.write(10); // Aktivierung der Pumpe
     delay(100);
-    pump2.write(90);
+    pump2.write(90); // Deaktivierung der Pumpe
     pump2.detach();
-    isPump2Attached = false;
+    correctionTimes[correctionIndex++] = currentMillis; // Speichern des Zeitstempels
+    if (correctionIndex >= 120) correctionIndex = 0; // Array-Wrap-around
+    plusCorrectionCount++; // Zählung der pH-Plus Korrekturen
   }
 }
+
+
 
 void controlPumpsWithButtons() {
   int buttonState1 = digitalRead(BUTTON_PIN_1);
   int buttonState2 = digitalRead(BUTTON_PIN_2);
+  int buttonState3 = digitalRead(BUTTON_PIN_3);  // Taste für pH erhöhen
+  int buttonState4 = digitalRead(BUTTON_PIN_4);  // Taste für pH verringern
+
 
   Serial.print("Button 1 State: ");
   Serial.println(buttonState1);
@@ -344,9 +396,21 @@ void controlPumpsWithButtons() {
     pump2.detach();
     isPump2Attached = false;
   }
+
+   if (buttonState3 == LOW) {
+    setPointPH += 0.05;  // Erhöht den pH-Sollwert um 0.5
+    Serial.print("pH-Sollwert erhöht auf: ");
+    Serial.println(setPointPH);
+    delay(500); // Entprellung und um versehentliche mehrfache Änderungen zu vermeiden
+  }
+
+  if (buttonState4 == LOW) {
+    setPointPH -= 0.05;  // Verringert den pH-Sollwert um 0.5
+    Serial.print("pH-Sollwert verringert auf: ");
+    Serial.println(setPointPH);
+    delay(500); // Entprellung und um versehentliche mehrfache Änderungen zu vermeiden
+  }
 }
-
-
 
 void saveDataToSDCard(String timeStamp) {
   sensors.requestTemperatures();
