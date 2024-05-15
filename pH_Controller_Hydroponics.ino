@@ -335,7 +335,7 @@ void controlPumps(float pHValue) {
 
   // Pumpe 1 an D9 senkt den pH-Wert, wenn er über dem Sollwert plus Schwellenwert liegt
   if (pHValue > setPointPH + PH_THRESHOLD && !isPump1Attached) {
-    pump1.attach(9); // Pumpe 1 für pH-Minus
+    pump1.attach(8); // Pumpe 1 für pH-Minus
     pump1.write(170); // Aktivierung der Pumpe
     delay(100);
     pump1.write(90); // Deaktivierung der Pumpe
@@ -347,7 +347,7 @@ void controlPumps(float pHValue) {
 
   // Pumpe 2 an D8 erhöht den pH-Wert, wenn er unter dem Sollwert minus Schwellenwert liegt
   if (pHValue < setPointPH - PH_THRESHOLD && !isPump2Attached) {
-    pump2.attach(8); // Pumpe 2 für pH-Plus
+    pump2.attach(9); // Pumpe 2 für pH-Plus
     pump2.write(10); // Aktivierung der Pumpe
     delay(100);
     pump2.write(90); // Deaktivierung der Pumpe
