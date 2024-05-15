@@ -374,7 +374,7 @@ void controlPumpsWithButtons() {
 
   // Überprüfen Sie, ob der Button gedrückt ist (LOW bei INPUT_PULLUP)
   if (buttonState1 == LOW) {
-    pump1.attach(8); // Pumpe rechts PH-Plus
+    pump1.attach(8); // Pumpe links PH-Plus
     isPump1Attached = true;
     pump1.write(160); // Pumpe an
     Serial.println("Pump 1 ON");
@@ -386,7 +386,7 @@ void controlPumpsWithButtons() {
   }
 
   if (buttonState2 == LOW) {
-    pump2.attach(9); // Pumpe links PH-Minus
+    pump2.attach(9); // Pumpe rechts PH-Minus
     isPump2Attached = true;
     pump2.write(20); // Pumpe an
     Serial.println("Pump 2 ON");
